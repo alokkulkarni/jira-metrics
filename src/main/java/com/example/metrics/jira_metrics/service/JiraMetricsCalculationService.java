@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -93,24 +94,22 @@ public class JiraMetricsCalculationService {
                 logger.info("Recalculating progress metrics for active sprint {}", sprintId);
             }
 
-            // Create base metrics with appropriate end date
+            // Create comprehensive metrics with all calculations
             var metricsEndDate = isCompleted && sprint.completeDate() != null
                                ? sprint.completeDate()
                                : sprint.endDate();
 
-            var metrics = BoardMetrics.create(sprint.boardId(), sprint.sprintId(),
-                                            sprint.startDate(), metricsEndDate);
+            var calculatedMetrics = createComprehensiveMetrics(
+                sprint.boardId(),
+                sprintId,
+                sprint.startDate(),
+                metricsEndDate,
+                issues,
+                isCompleted
+            );
 
-            // Calculate and build metrics step by step - IMPORTANT: use returned instances
-            metrics = calculateVelocityMetrics(metrics, issues, isCompleted);
-            metrics = calculateQualityMetrics(metrics, issues, isCompleted);
-            metrics = calculateFlowMetrics(metrics, issues, isCompleted);
-            metrics = calculateChurnMetrics(metrics, issues, isCompleted);
-
-            // Save calculated metrics (update existing if present)
-            var savedMetrics = existingMetrics.isPresent()
-                             ? boardMetricsRepository.save(metrics.withId(existingMetrics.get().id()))
-                             : boardMetricsRepository.save(metrics);
+            // Save calculated metrics
+            var savedMetrics = boardMetricsRepository.save(calculatedMetrics);
 
             logger.info("Successfully calculated and saved {} metrics for sprint {} with ID: {}",
                        isCompleted ? "final" : "progress", sprintId, savedMetrics.id());
@@ -124,200 +123,171 @@ public class JiraMetricsCalculationService {
     }
 
     /**
-     * Calculates velocity metrics including story points and issue count.
-     * Handles both active and completed sprints appropriately.
+     * Creates comprehensive BoardMetrics with all calculated values.
      *
-     * @param metrics The base metrics object
-     * @param issues List of issues in the sprint
+     * @param boardId The board ID
+     * @param sprintId The sprint ID
+     * @param periodStart The metrics period start
+     * @param periodEnd The metrics period end
+     * @param issues The list of issues for calculation
      * @param isCompleted Whether the sprint is completed
-     * @return Updated metrics with velocity data
+     * @return Complete BoardMetrics instance
      */
-    private BoardMetrics calculateVelocityMetrics(BoardMetrics metrics, List<Issue> issues, boolean isCompleted) {
-        logger.debug("Calculating {} velocity metrics for {} issues",
-                    isCompleted ? "final" : "progress", issues.size());
+    private BoardMetrics createComprehensiveMetrics(Long boardId, Long sprintId,
+                                                   LocalDateTime periodStart, LocalDateTime periodEnd,
+                                                   List<Issue> issues, boolean isCompleted) {
 
+        // Calculate velocity metrics
         var totalStoryPoints = issues.stream()
-                .mapToDouble(Issue::getStoryPointsAsDouble)
-                .sum();
+                .map(Issue::storyPoints)
+                .filter(sp -> sp != null)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        var completedStoryPoints = issues.stream()
-                .filter(Issue::isResolved)
-                .mapToDouble(Issue::getStoryPointsAsDouble)
-                .sum();
+        var completedIssues = issues.stream()
+                .filter(this::isIssueCompleted)
+                .collect(Collectors.toList());
 
-        var completedIssueCount = (int) issues.stream()
-                .filter(Issue::isResolved)
+        var completedStoryPoints = completedIssues.stream()
+                .map(Issue::storyPoints)
+                .filter(sp -> sp != null)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        var completedIssueCount = completedIssues.size();
+
+        // Calculate quality metrics
+        var defectCount = (int) issues.stream()
+                .filter(issue -> "Bug".equalsIgnoreCase(issue.issueType()))
                 .count();
 
-        // For active sprints, log current progress
-        if (!isCompleted) {
-            var progressPercentage = totalStoryPoints > 0
-                ? (completedStoryPoints / totalStoryPoints) * 100
-                : 0.0;
-            logger.debug("Sprint progress: {:.1f}% complete ({} of {} story points)",
-                        progressPercentage, completedStoryPoints, totalStoryPoints);
-        }
+        var defectRate = issues.isEmpty() ? BigDecimal.ZERO :
+                BigDecimal.valueOf(defectCount)
+                        .divide(BigDecimal.valueOf(issues.size()), 4, RoundingMode.HALF_UP)
+                        .multiply(BigDecimal.valueOf(100));
 
-        logger.debug("Velocity: {} completed story points, {} completed issues",
-                    completedStoryPoints, completedIssueCount);
+        // Calculate flow metrics
+        var cycleTimeAvg = calculateAverageCycleTime(completedIssues);
+        var cycleTimeMedian = calculateMedianCycleTime(completedIssues);
 
-        return metrics.withVelocityMetrics(
-                metrics.boardId(),
-                metrics.sprintId(),
-                metrics.metricPeriodStart(),
-                metrics.metricPeriodEnd(),
-                BigDecimal.valueOf(completedStoryPoints),
+        // Calculate predictability metrics
+        var commitmentReliability = totalStoryPoints.compareTo(BigDecimal.ZERO) > 0 ?
+                completedStoryPoints.divide(totalStoryPoints, 4, RoundingMode.HALF_UP)
+                        .multiply(BigDecimal.valueOf(100)) : BigDecimal.ZERO;
+
+        var sprintGoalSuccess = commitmentReliability.compareTo(BigDecimal.valueOf(80)) >= 0;
+
+        logger.debug("Calculated metrics - Velocity: {} SP completed, Quality: {} defects, " +
+                    "Flow: {} avg cycle time, Predictability: {}% commitment reliability",
+                    completedStoryPoints, defectCount, cycleTimeAvg, commitmentReliability);
+
+        return new BoardMetrics(
+                null, // id will be generated
+                boardId,
+                sprintId,
+                periodStart,
+                periodEnd,
+                BoardMetrics.MetricType.SPRINT_BASED.getValue(),
+                "scrum", // Sprint-based boards are typically Scrum
+                // Velocity metrics
+                completedStoryPoints,
                 completedIssueCount,
-                BigDecimal.valueOf(totalStoryPoints),
-                BigDecimal.valueOf(completedStoryPoints)
+                totalStoryPoints,
+                completedStoryPoints,
+                // Quality metrics
+                defectCount,
+                defectRate,
+                0, // escaped defects - would need additional data
+                BigDecimal.ZERO, // defect density
+                // Flow metrics
+                cycleTimeAvg,
+                cycleTimeMedian,
+                cycleTimeAvg, // lead time approximation
+                cycleTimeMedian,
+                // Churn metrics (sprint-specific)
+                0, // scope changes - would need sprint history
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                // Predictability metrics
+                commitmentReliability,
+                sprintGoalSuccess,
+                // Throughput metrics
+                completedIssueCount,
+                completedStoryPoints,
+                // Team metrics
+                BigDecimal.ZERO, // would need capacity data
+                BigDecimal.ZERO,
+                BigDecimal.ZERO,
+                // Issue-based metrics (not applicable for sprint-based)
+                null, null, null, null,
+                LocalDateTime.now()
         );
     }
 
     /**
-     * Calculates quality metrics including defect rate and density.
-     * Adapts calculations based on sprint completion status.
+     * Checks if an issue is completed.
      *
-     * @param metrics The base metrics object
-     * @param issues List of issues in the sprint
-     * @param isCompleted Whether the sprint is completed
-     * @return Updated metrics with quality data
+     * @param issue The issue to check
+     * @return true if the issue is completed
      */
-    private BoardMetrics calculateQualityMetrics(BoardMetrics metrics, List<Issue> issues, boolean isCompleted) {
-        logger.debug("Calculating {} quality metrics", isCompleted ? "final" : "current");
-
-        var defectCount = (int) issues.stream()
-                .filter(Issue::isDefect)
-                .count();
-
-        var totalIssues = issues.size();
-        var defectRate = totalIssues > 0 ?
-                BigDecimal.valueOf((double) defectCount / totalIssues)
-                        .setScale(4, RoundingMode.HALF_UP) :
-                BigDecimal.ZERO;
-
-        var totalStoryPoints = issues.stream()
-                .mapToDouble(Issue::getStoryPointsAsDouble)
-                .sum();
-
-        var defectDensity = totalStoryPoints > 0 ?
-                BigDecimal.valueOf(defectCount / totalStoryPoints)
-                        .setScale(4, RoundingMode.HALF_UP) :
-                BigDecimal.ZERO;
-
-        // For escaped defects, only count for completed sprints or use current time for active sprints
-        var cutoffDate = isCompleted ? metrics.metricPeriodEnd() : LocalDateTime.now();
-        var escapedDefects = (int) issues.stream()
-                .filter(Issue::isDefect)
-                .filter(issue -> issue.resolvedDate() != null &&
-                               issue.resolvedDate().isAfter(cutoffDate))
-                .count();
-
-        logger.debug("Quality: {} defects, rate: {}, density: {} ({})",
-                    defectCount, defectRate, defectDensity,
-                    isCompleted ? "final" : "current");
-
-        return metrics.withQualityMetrics(defectCount, defectRate, escapedDefects, defectDensity);
+    private boolean isIssueCompleted(Issue issue) {
+        var status = issue.status();
+        return "Done".equalsIgnoreCase(status) ||
+               "Closed".equalsIgnoreCase(status) ||
+               "Resolved".equalsIgnoreCase(status);
     }
 
     /**
-     * Calculates flow metrics including cycle time and lead time.
-     * Provides meaningful metrics for both active and completed sprints.
+     * Calculates average cycle time for completed issues.
      *
-     * @param metrics The base metrics object
-     * @param issues List of issues in the sprint
-     * @param isCompleted Whether the sprint is completed
-     * @return Updated metrics with flow data
+     * @param completedIssues List of completed issues
+     * @return Average cycle time in days
      */
-    private BoardMetrics calculateFlowMetrics(BoardMetrics metrics, List<Issue> issues, boolean isCompleted) {
-        logger.debug("Calculating {} flow metrics", isCompleted ? "final" : "current");
-
-        var cycleTimes = issues.stream()
-                .filter(Issue::isResolved)
-                .map(Issue::getCycleTimeHours)
-                .filter(Optional::isPresent)
-                .map(Optional::get)
+    private BigDecimal calculateAverageCycleTime(List<Issue> completedIssues) {
+        var cycleTimesInDays = completedIssues.stream()
+                .filter(issue -> issue.createdDate() != null && issue.resolvedDate() != null)
+                .mapToLong(issue -> ChronoUnit.DAYS.between(issue.createdDate(), issue.resolvedDate()))
+                .filter(days -> days > 0)
+                .boxed()
                 .collect(Collectors.toList());
 
-        if (cycleTimes.isEmpty()) {
-            logger.debug("No completed issues with cycle time data found for {} sprint",
-                        isCompleted ? "completed" : "active");
-            return metrics;
+        if (cycleTimesInDays.isEmpty()) {
+            return BigDecimal.ZERO;
         }
 
-        var avgCycleTime = cycleTimes.stream()
-                .mapToDouble(Double::doubleValue)
+        var average = cycleTimesInDays.stream()
+                .mapToLong(Long::longValue)
                 .average()
                 .orElse(0.0);
 
-        var sortedCycleTimes = cycleTimes.stream()
-                .sorted()
-                .collect(Collectors.toList());
-
-        var medianCycleTime = calculateMedian(sortedCycleTimes);
-
-        // For simplicity, using cycle time as lead time (can be enhanced)
-        var avgLeadTime = avgCycleTime;
-        var medianLeadTime = medianCycleTime;
-
-        logger.debug("Flow: avg cycle time: {} hours, median: {} hours (based on {} completed issues)",
-                    avgCycleTime, medianCycleTime, cycleTimes.size());
-
-        return metrics.withFlowMetrics(
-                BigDecimal.valueOf(avgCycleTime).setScale(2, RoundingMode.HALF_UP),
-                BigDecimal.valueOf(medianCycleTime).setScale(2, RoundingMode.HALF_UP),
-                BigDecimal.valueOf(avgLeadTime).setScale(2, RoundingMode.HALF_UP),
-                BigDecimal.valueOf(medianLeadTime).setScale(2, RoundingMode.HALF_UP)
-        );
+        return BigDecimal.valueOf(average).setScale(2, RoundingMode.HALF_UP);
     }
 
     /**
-     * Calculates churn metrics including scope changes.
-     * Tracks scope changes throughout the sprint lifecycle.
+     * Calculates median cycle time for completed issues.
      *
-     * @param metrics The base metrics object
-     * @param issues List of issues in the sprint
-     * @param isCompleted Whether the sprint is completed
-     * @return Updated metrics with churn data
+     * @param completedIssues List of completed issues
+     * @return Median cycle time in days
      */
-    private BoardMetrics calculateChurnMetrics(BoardMetrics metrics, List<Issue> issues, boolean isCompleted) {
-        logger.debug("Calculating {} churn metrics", isCompleted ? "final" : "current");
+    private BigDecimal calculateMedianCycleTime(List<Issue> completedIssues) {
+        var cycleTimesInDays = completedIssues.stream()
+                .filter(issue -> issue.createdDate() != null && issue.resolvedDate() != null)
+                .mapToLong(issue -> ChronoUnit.DAYS.between(issue.createdDate(), issue.resolvedDate()))
+                .filter(days -> days > 0)
+                .sorted()
+                .boxed()
+                .collect(Collectors.toList());
 
-        var totalStoryPoints = issues.stream()
-                .mapToDouble(Issue::getStoryPointsAsDouble)
-                .sum();
-
-        // Estimate scope changes based on issue creation dates during sprint
-        var scopeChanges = (int) issues.stream()
-                .filter(issue -> issue.createdDate() != null &&
-                               issue.createdDate().isAfter(metrics.metricPeriodStart()))
-                .count();
-
-        var addedStoryPoints = issues.stream()
-                .filter(issue -> issue.createdDate() != null &&
-                               issue.createdDate().isAfter(metrics.metricPeriodStart()))
-                .mapToDouble(Issue::getStoryPointsAsDouble)
-                .sum();
-
-        var churnRate = totalStoryPoints > 0 ?
-                BigDecimal.valueOf(addedStoryPoints / totalStoryPoints)
-                        .setScale(4, RoundingMode.HALF_UP) :
-                BigDecimal.ZERO;
-
-        // Log additional context for active sprints
-        if (!isCompleted && scopeChanges > 0) {
-            logger.info("Active sprint {} has {} scope changes ({} story points added)",
-                       metrics.sprintId(), scopeChanges, addedStoryPoints);
+        if (cycleTimesInDays.isEmpty()) {
+            return BigDecimal.ZERO;
         }
 
-        logger.debug("Churn: {} scope changes, rate: {}, added points: {}",
-                    scopeChanges, churnRate, addedStoryPoints);
-
-        return metrics.withChurnMetrics(
-                scopeChanges,
-                churnRate,
-                BigDecimal.valueOf(addedStoryPoints),
-                BigDecimal.ZERO // Simplified - not tracking removed points
-        );
+        var size = cycleTimesInDays.size();
+        if (size % 2 == 0) {
+            var median = (cycleTimesInDays.get(size / 2 - 1) + cycleTimesInDays.get(size / 2)) / 2.0;
+            return BigDecimal.valueOf(median).setScale(2, RoundingMode.HALF_UP);
+        } else {
+            return BigDecimal.valueOf(cycleTimesInDays.get(size / 2)).setScale(2, RoundingMode.HALF_UP);
+        }
     }
 
     /**

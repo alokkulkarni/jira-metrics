@@ -10,6 +10,7 @@ import java.time.LocalDateTime;
 /**
  * Entity representing calculated JIRA metrics and insights for a board and time period.
  * Includes velocity, quality, flow, churn, predictability, and team metrics.
+ * Supports both sprint-based and issue-based metrics calculation.
  *
  * @author JIRA Metrics Team
  * @since 1.0.0
@@ -30,6 +31,12 @@ public record BoardMetrics(
 
         @Column("metric_period_end")
         LocalDateTime metricPeriodEnd,
+
+        @Column("metric_type")
+        String metricType, // "SPRINT_BASED" or "ISSUE_BASED"
+
+        @Column("board_type")
+        String boardType, // "scrum", "kanban", "simple"
 
         // Velocity metrics
         @Column("velocity_story_points")
@@ -70,7 +77,7 @@ public record BoardMetrics(
         @Column("lead_time_median")
         BigDecimal leadTimeMedian,
 
-        // Churn metrics
+        // Churn metrics (applicable mainly for sprint-based)
         @Column("scope_change_count")
         Integer scopeChangeCount,
 
@@ -101,184 +108,125 @@ public record BoardMetrics(
         @Column("team_capacity_hours")
         BigDecimal teamCapacityHours,
 
-        @Column("utilization_rate")
-        BigDecimal utilizationRate,
+        @Column("team_utilization")
+        BigDecimal teamUtilization,
+
+        @Column("team_focus_factor")
+        BigDecimal teamFocusFactor,
+
+        // Issue-based specific metrics
+        @Column("issues_in_progress")
+        Integer issuesInProgress,
+
+        @Column("issues_in_backlog")
+        Integer issuesInBacklog,
+
+        @Column("issues_done")
+        Integer issuesDone,
+
+        @Column("wip_limit_adherence")
+        BigDecimal wipLimitAdherence,
 
         @Column("created_at")
-        LocalDateTime createdAt,
-
-        @Column("updated_at")
-        LocalDateTime updatedAt
+        LocalDateTime createdAt
 ) {
 
     /**
-     * Creates a new BoardMetrics instance with current timestamp.
-     *
-     * @param boardId The board ID
-     * @param sprintId The sprint ID (optional)
-     * @param metricPeriodStart Start of the metrics period
-     * @param metricPeriodEnd End of the metrics period
-     * @return A new BoardMetrics instance with default values
+     * Enumeration for metric calculation types.
      */
-    public static BoardMetrics create(Long boardId, Long sprintId,
-                                    LocalDateTime metricPeriodStart, LocalDateTime metricPeriodEnd) {
-        return new BoardMetrics(
-                null, boardId, sprintId, metricPeriodStart, metricPeriodEnd,
-                BigDecimal.ZERO, 0, BigDecimal.ZERO, BigDecimal.ZERO,
-                0, BigDecimal.ZERO, 0, BigDecimal.ZERO,
-                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
-                0, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
-                BigDecimal.ZERO, false,
-                0, BigDecimal.ZERO,
-                BigDecimal.ZERO, BigDecimal.ZERO,
-                LocalDateTime.now(), null
-        );
-    }
+    public enum MetricType {
+        SPRINT_BASED("SPRINT_BASED"),
+        ISSUE_BASED("ISSUE_BASED");
 
-    /**
-     * Creates a BoardMetrics instance with calculated velocity metrics.
-     *
-     * @param boardId The board ID
-     * @param sprintId The sprint ID
-     * @param metricPeriodStart Start of the metrics period
-     * @param metricPeriodEnd End of the metrics period
-     * @param velocityStoryPoints Velocity in story points
-     * @param velocityIssueCount Velocity in issue count
-     * @param plannedStoryPoints Originally planned story points
-     * @param completedStoryPoints Actually completed story points
-     * @return A new BoardMetrics instance with velocity data
-     */
-    public static BoardMetrics withVelocityMetrics(Long boardId, Long sprintId,
-                                                 LocalDateTime metricPeriodStart, LocalDateTime metricPeriodEnd,
-                                                 BigDecimal velocityStoryPoints, Integer velocityIssueCount,
-                                                 BigDecimal plannedStoryPoints, BigDecimal completedStoryPoints) {
-        var baseMetrics = create(boardId, sprintId, metricPeriodStart, metricPeriodEnd);
-        return new BoardMetrics(
-                baseMetrics.id, baseMetrics.boardId, baseMetrics.sprintId,
-                baseMetrics.metricPeriodStart, baseMetrics.metricPeriodEnd,
-                velocityStoryPoints, velocityIssueCount, plannedStoryPoints, completedStoryPoints,
-                baseMetrics.defectCount, baseMetrics.defectRate, baseMetrics.escapedDefects, baseMetrics.defectDensity,
-                baseMetrics.cycleTimeAvg, baseMetrics.cycleTimeMedian, baseMetrics.leadTimeAvg, baseMetrics.leadTimeMedian,
-                baseMetrics.scopeChangeCount, baseMetrics.scopeChurnRate, baseMetrics.addedStoryPoints, baseMetrics.removedStoryPoints,
-                baseMetrics.commitmentReliability, baseMetrics.sprintGoalSuccess,
-                baseMetrics.throughputIssues, baseMetrics.throughputStoryPoints,
-                baseMetrics.teamCapacityHours, baseMetrics.utilizationRate,
-                baseMetrics.createdAt, baseMetrics.updatedAt
-        );
-    }
+        private final String value;
 
-    /**
-     * Updates this metrics instance with quality metrics.
-     *
-     * @param defectCount Number of defects
-     * @param defectRate Defect rate as percentage (0.0 to 1.0)
-     * @param escapedDefects Number of escaped defects
-     * @param defectDensity Defects per story point
-     * @return Updated BoardMetrics instance
-     */
-    public BoardMetrics withQualityMetrics(Integer defectCount, BigDecimal defectRate,
-                                         Integer escapedDefects, BigDecimal defectDensity) {
-        return new BoardMetrics(
-                this.id, this.boardId, this.sprintId, this.metricPeriodStart, this.metricPeriodEnd,
-                this.velocityStoryPoints, this.velocityIssueCount, this.plannedStoryPoints, this.completedStoryPoints,
-                defectCount, defectRate, escapedDefects, defectDensity,
-                this.cycleTimeAvg, this.cycleTimeMedian, this.leadTimeAvg, this.leadTimeMedian,
-                this.scopeChangeCount, this.scopeChurnRate, this.addedStoryPoints, this.removedStoryPoints,
-                this.commitmentReliability, this.sprintGoalSuccess,
-                this.throughputIssues, this.throughputStoryPoints,
-                this.teamCapacityHours, this.utilizationRate,
-                this.createdAt, LocalDateTime.now()
-        );
-    }
-
-    /**
-     * Updates this metrics instance with flow metrics.
-     *
-     * @param cycleTimeAvg Average cycle time in hours
-     * @param cycleTimeMedian Median cycle time in hours
-     * @param leadTimeAvg Average lead time in hours
-     * @param leadTimeMedian Median lead time in hours
-     * @return Updated BoardMetrics instance
-     */
-    public BoardMetrics withFlowMetrics(BigDecimal cycleTimeAvg, BigDecimal cycleTimeMedian,
-                                      BigDecimal leadTimeAvg, BigDecimal leadTimeMedian) {
-        return new BoardMetrics(
-                this.id, this.boardId, this.sprintId, this.metricPeriodStart, this.metricPeriodEnd,
-                this.velocityStoryPoints, this.velocityIssueCount, this.plannedStoryPoints, this.completedStoryPoints,
-                this.defectCount, this.defectRate, this.escapedDefects, this.defectDensity,
-                cycleTimeAvg, cycleTimeMedian, leadTimeAvg, leadTimeMedian,
-                this.scopeChangeCount, this.scopeChurnRate, this.addedStoryPoints, this.removedStoryPoints,
-                this.commitmentReliability, this.sprintGoalSuccess,
-                this.throughputIssues, this.throughputStoryPoints,
-                this.teamCapacityHours, this.utilizationRate,
-                this.createdAt, LocalDateTime.now()
-        );
-    }
-
-    /**
-     * Updates this metrics instance with churn metrics.
-     *
-     * @param scopeChangeCount Number of scope changes
-     * @param scopeChurnRate Scope churn rate as percentage (0.0 to 1.0)
-     * @param addedStoryPoints Story points added during sprint
-     * @param removedStoryPoints Story points removed during sprint
-     * @return Updated BoardMetrics instance
-     */
-    public BoardMetrics withChurnMetrics(Integer scopeChangeCount, BigDecimal scopeChurnRate,
-                                       BigDecimal addedStoryPoints, BigDecimal removedStoryPoints) {
-        return new BoardMetrics(
-                this.id, this.boardId, this.sprintId, this.metricPeriodStart, this.metricPeriodEnd,
-                this.velocityStoryPoints, this.velocityIssueCount, this.plannedStoryPoints, this.completedStoryPoints,
-                this.defectCount, this.defectRate, this.escapedDefects, this.defectDensity,
-                this.cycleTimeAvg, this.cycleTimeMedian, this.leadTimeAvg, this.leadTimeMedian,
-                scopeChangeCount, scopeChurnRate, addedStoryPoints, removedStoryPoints,
-                this.commitmentReliability, this.sprintGoalSuccess,
-                this.throughputIssues, this.throughputStoryPoints,
-                this.teamCapacityHours, this.utilizationRate,
-                this.createdAt, LocalDateTime.now()
-        );
-    }
-
-    /**
-     * Calculates the velocity achievement rate.
-     *
-     * @return Percentage of planned vs completed story points (0.0 to 1.0+)
-     */
-    public BigDecimal getVelocityAchievementRate() {
-        if (plannedStoryPoints != null && plannedStoryPoints.compareTo(BigDecimal.ZERO) > 0) {
-            return completedStoryPoints.divide(plannedStoryPoints, 4, java.math.RoundingMode.HALF_UP);
+        MetricType(String value) {
+            this.value = value;
         }
-        return BigDecimal.ZERO;
+
+        public String getValue() {
+            return value;
+        }
     }
 
     /**
-     * Checks if the sprint goal was successfully achieved.
+     * Creates a new BoardMetrics instance for sprint-based calculations.
      *
-     * @return true if sprint goal success is true and velocity achievement >= 80%
+     * @param boardId Board identifier
+     * @param sprintId Sprint identifier
+     * @param periodStart Metric calculation period start
+     * @param periodEnd Metric calculation period end
+     * @param boardType Type of board
+     * @return New BoardMetrics instance
      */
-    public boolean isSprintSuccessful() {
-        return Boolean.TRUE.equals(sprintGoalSuccess) &&
-               getVelocityAchievementRate().compareTo(new BigDecimal("0.8")) >= 0;
-    }
-
-    /**
-     * Creates a copy of this BoardMetrics with a new ID.
-     * Useful for updating existing metrics in the database.
-     *
-     * @param newId The new ID to assign
-     * @return BoardMetrics instance with the specified ID
-     */
-    public BoardMetrics withId(Long newId) {
+    public static BoardMetrics createSprintBased(Long boardId, Long sprintId,
+                                                LocalDateTime periodStart, LocalDateTime periodEnd, String boardType) {
         return new BoardMetrics(
-                newId, this.boardId, this.sprintId, this.metricPeriodStart, this.metricPeriodEnd,
-                this.velocityStoryPoints, this.velocityIssueCount, this.plannedStoryPoints, this.completedStoryPoints,
-                this.defectCount, this.defectRate, this.escapedDefects, this.defectDensity,
-                this.cycleTimeAvg, this.cycleTimeMedian, this.leadTimeAvg, this.leadTimeMedian,
-                this.scopeChangeCount, this.scopeChurnRate, this.addedStoryPoints, this.removedStoryPoints,
-                this.commitmentReliability, this.sprintGoalSuccess,
-                this.throughputIssues, this.throughputStoryPoints,
-                this.teamCapacityHours, this.utilizationRate,
-                this.createdAt, LocalDateTime.now()
+                null, // id will be generated
+                boardId,
+                sprintId,
+                periodStart,
+                periodEnd,
+                MetricType.SPRINT_BASED.getValue(),
+                boardType,
+                null, null, null, null, // velocity metrics - to be calculated
+                null, null, null, null, // quality metrics - to be calculated
+                null, null, null, null, // flow metrics - to be calculated
+                null, null, null, null, // churn metrics - to be calculated
+                null, null, // predictability metrics - to be calculated
+                null, null, // throughput metrics - to be calculated
+                null, null, null, // team metrics - to be calculated
+                null, null, null, null, // issue-based metrics - not applicable
+                LocalDateTime.now()
         );
+    }
+
+    /**
+     * Creates a new BoardMetrics instance for issue-based calculations.
+     *
+     * @param boardId Board identifier
+     * @param periodStart Metric calculation period start
+     * @param periodEnd Metric calculation period end
+     * @param boardType Type of board
+     * @return New BoardMetrics instance
+     */
+    public static BoardMetrics createIssueBased(Long boardId, LocalDateTime periodStart,
+                                               LocalDateTime periodEnd, String boardType) {
+        return new BoardMetrics(
+                null, // id will be generated
+                boardId,
+                null, // no sprint ID for issue-based metrics
+                periodStart,
+                periodEnd,
+                MetricType.ISSUE_BASED.getValue(),
+                boardType,
+                null, null, null, null, // velocity metrics - to be calculated
+                null, null, null, null, // quality metrics - to be calculated
+                null, null, null, null, // flow metrics - to be calculated
+                null, null, null, null, // churn metrics - not applicable for issue-based
+                null, null, // predictability metrics - modified for issue-based
+                null, null, // throughput metrics - to be calculated
+                null, null, null, // team metrics - to be calculated
+                null, null, null, null, // issue-based metrics - to be calculated
+                LocalDateTime.now()
+        );
+    }
+
+    /**
+     * Checks if these metrics are sprint-based.
+     *
+     * @return true if metrics are calculated based on sprint data
+     */
+    public boolean isSprintBased() {
+        return MetricType.SPRINT_BASED.getValue().equals(metricType);
+    }
+
+    /**
+     * Checks if these metrics are issue-based.
+     *
+     * @return true if metrics are calculated based on issue data only
+     */
+    public boolean isIssueBased() {
+        return MetricType.ISSUE_BASED.getValue().equals(metricType);
     }
 }

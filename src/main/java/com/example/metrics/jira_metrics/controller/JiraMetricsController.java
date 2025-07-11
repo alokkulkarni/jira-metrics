@@ -10,13 +10,16 @@ import com.example.metrics.jira_metrics.service.JiraClientService;
 import com.example.metrics.jira_metrics.service.JiraDataScheduledJob;
 import com.example.metrics.jira_metrics.service.JiraDataService;
 import com.example.metrics.jira_metrics.service.BoardSynchronizationService;
+import com.example.metrics.jira_metrics.service.BoardValidationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import jakarta.validation.Valid;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -25,7 +28,8 @@ import java.util.Optional;
 
 /**
  * REST controller for managing JIRA boards and viewing collected data.
- * Provides endpoints for board management and data retrieval operations.
+ * Provides endpoints for board management, validation, and metrics retrieval operations.
+ * Supports both sprint-based and issue-based metrics calculation.
  */
 @RestController
 @RequestMapping("/api/v1")
@@ -39,6 +43,7 @@ public class JiraMetricsController {
     private final JiraDataScheduledJob jiraDataScheduledJob;
     private final JiraClientService jiraClientService;
     private final BoardSynchronizationService boardSynchronizationService;
+    private final BoardValidationService boardValidationService;
 
     /**
      * Constructor for JiraMetricsController.
@@ -49,52 +54,173 @@ public class JiraMetricsController {
      * @param jiraDataScheduledJob   Scheduled job service
      * @param jiraClientService      JIRA client service
      * @param boardSynchronizationService Board synchronization service
+     * @param boardValidationService Board validation service
      */
     public JiraMetricsController(BoardRepository boardRepository,
                                 TeamRepository teamRepository,
                                 JiraDataService jiraDataService,
                                 JiraDataScheduledJob jiraDataScheduledJob,
                                 JiraClientService jiraClientService,
-                                BoardSynchronizationService boardSynchronizationService) {
+                                BoardSynchronizationService boardSynchronizationService,
+                                BoardValidationService boardValidationService) {
         this.boardRepository = boardRepository;
         this.teamRepository = teamRepository;
         this.jiraDataService = jiraDataService;
         this.jiraDataScheduledJob = jiraDataScheduledJob;
         this.jiraClientService = jiraClientService;
         this.boardSynchronizationService = boardSynchronizationService;
+        this.boardValidationService = boardValidationService;
     }
 
     /**
-     * Retrieves all active boards.
+     * Retrieves all active boards with sprint validation information.
      *
-     * @return List of active boards
+     * @return List of active boards with sprint availability details
      */
     @GetMapping("/boards")
-    public ResponseEntity<List<Board>> getAllActiveBoards() {
-        logger.debug("Retrieving all active boards");
+    public ResponseEntity<List<Map<String, Object>>> getAllActiveBoards() {
+        logger.debug("Retrieving all active boards with validation");
         List<Board> boards = boardRepository.findAllActiveBoards();
-        logger.info("Retrieved {} active boards", boards.size());
-        return ResponseEntity.ok(boards);
+
+        List<Map<String, Object>> boardsWithValidation = new ArrayList<>();
+        for (Board board : boards) {
+            Map<String, Object> boardInfo = new HashMap<>();
+            boardInfo.put("board", board);
+            boardInfo.put("boardType", board.getBoardType());
+            boardInfo.put("hasSprints", board.getHasSprints());
+            boardInfo.put("sprintCount", board.getSprintCount());
+            boardInfo.put("supportsSprintMetrics", board.supportsSprintMetrics());
+            boardInfo.put("metricsType", board.supportsSprintMetrics() ? "SPRINT_BASED" : "ISSUE_BASED");
+            boardsWithValidation.add(boardInfo);
+        }
+
+        logger.info("Retrieved {} active boards with validation info", boards.size());
+        return ResponseEntity.ok(boardsWithValidation);
     }
 
     /**
-     * Retrieves a specific board by ID.
+     * Validates a specific board and returns its sprint availability information.
+     *
+     * @param boardId The board ID to validate
+     * @return Board validation information
+     */
+    @PostMapping("/boards/{boardId}/validate")
+    public ResponseEntity<Map<String, Object>> validateBoard(@PathVariable Long boardId) {
+        logger.info("Validating board ID: {}", boardId);
+
+        Optional<Board> validatedBoard = boardValidationService.validateAndUpdateBoard(boardId);
+        if (validatedBoard.isEmpty()) {
+            logger.warn("Board not found or validation failed for ID: {}", boardId);
+            return ResponseEntity.notFound().build();
+        }
+
+        Board board = validatedBoard.get();
+        Map<String, Object> validationResult = new HashMap<>();
+        validationResult.put("boardId", board.getBoardId());
+        validationResult.put("boardName", board.getBoardName());
+        validationResult.put("boardType", board.getBoardType());
+        validationResult.put("hasSprints", board.getHasSprints());
+        validationResult.put("sprintCount", board.getSprintCount());
+        validationResult.put("supportsSprintMetrics", board.supportsSprintMetrics());
+        validationResult.put("metricsType", board.supportsSprintMetrics() ? "SPRINT_BASED" : "ISSUE_BASED");
+        validationResult.put("lastValidated", board.getUpdatedAt());
+
+        logger.info("Board {} validated - Type: {}, Has Sprints: {}, Metrics Type: {}",
+                   boardId, board.getBoardType(), board.getHasSprints(),
+                   board.supportsSprintMetrics() ? "SPRINT_BASED" : "ISSUE_BASED");
+
+        return ResponseEntity.ok(validationResult);
+    }
+
+    /**
+     * Calculates and retrieves metrics for a board, automatically determining
+     * whether to use sprint-based or issue-based calculation.
      *
      * @param boardId The board ID
-     * @return Board entity if found
+     * @param periodStart Optional start date for metrics calculation
+     * @param periodEnd Optional end date for metrics calculation
+     * @return Calculated metrics with type information
+     */
+    @GetMapping("/boards/{boardId}/metrics")
+    public ResponseEntity<Map<String, Object>> getBoardMetrics(
+            @PathVariable Long boardId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
+            LocalDateTime periodStart,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
+            LocalDateTime periodEnd) {
+
+        logger.info("Calculating metrics for board ID: {} with period {} to {}",
+                   boardId, periodStart, periodEnd);
+
+        Optional<BoardMetrics> metricsOpt = boardValidationService.calculateBoardMetrics(
+            boardId, periodStart, periodEnd);
+
+        if (metricsOpt.isEmpty()) {
+            logger.warn("Unable to calculate metrics for board ID: {}", boardId);
+            return ResponseEntity.notFound().build();
+        }
+
+        BoardMetrics metrics = metricsOpt.get();
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("metrics", metrics);
+        response.put("metricType", metrics.metricType());
+        response.put("boardType", metrics.boardType());
+        response.put("isSprintBased", metrics.isSprintBased());
+        response.put("isIssueBased", metrics.isIssueBased());
+        response.put("calculationPeriod", Map.of(
+            "start", metrics.metricPeriodStart(),
+            "end", metrics.metricPeriodEnd()
+        ));
+
+        // Add contextual information based on metric type
+        if (metrics.isSprintBased()) {
+            response.put("sprintId", metrics.sprintId());
+            response.put("description", "Metrics calculated based on sprint data and sprint completion");
+        } else {
+            response.put("description", "Metrics calculated based on issue status transitions and backlog analysis");
+            response.put("issueBreakdown", Map.of(
+                "inProgress", metrics.issuesInProgress(),
+                "inBacklog", metrics.issuesInBacklog(),
+                "done", metrics.issuesDone()
+            ));
+        }
+
+        logger.info("Successfully calculated {} metrics for board {}",
+                   metrics.metricType(), boardId);
+
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Retrieves a specific board by ID with validation information.
+     *
+     * @param boardId The board ID
+     * @return Board entity with validation details if found
      */
     @GetMapping("/boards/{boardId}")
-    public ResponseEntity<Board> getBoardById(@PathVariable Long boardId) {
+    public ResponseEntity<Map<String, Object>> getBoardById(@PathVariable Long boardId) {
         logger.debug("Retrieving board with ID: {}", boardId);
 
-        Optional<Board> board = boardRepository.findByBoardId(boardId);
-        if (board.isPresent()) {
-            logger.debug("Found board: {}", board.get().getBoardName());
-            return ResponseEntity.ok(board.get());
-        } else {
+        Optional<Board> boardOpt = boardRepository.findByBoardId(boardId);
+        if (boardOpt.isEmpty()) {
             logger.warn("Board not found with ID: {}", boardId);
             return ResponseEntity.notFound().build();
         }
+
+        Board board = boardOpt.get();
+        Map<String, Object> response = new HashMap<>();
+        response.put("board", board);
+        response.put("boardType", board.getBoardType());
+        response.put("hasSprints", board.getHasSprints());
+        response.put("sprintCount", board.getSprintCount());
+        response.put("supportsSprintMetrics", board.supportsSprintMetrics());
+        response.put("recommendedMetricsType", board.supportsSprintMetrics() ? "SPRINT_BASED" : "ISSUE_BASED");
+
+        logger.debug("Found board: {} (Type: {}, Has Sprints: {})",
+                    board.getBoardName(), board.getBoardType(), board.getHasSprints());
+
+        return ResponseEntity.ok(response);
     }
 
     /**
@@ -330,34 +456,6 @@ public class JiraMetricsController {
         }
     }
 
-    /**
-     * Retrieves calculated metrics for a specific board.
-     *
-     * @param boardId The board ID
-     * @return List of calculated metrics
-     */
-    @GetMapping("/boards/{boardId}/metrics")
-    public ResponseEntity<List<BoardMetrics>> getBoardMetrics(@PathVariable Long boardId) {
-        logger.debug("Retrieving calculated metrics for board ID: {}", boardId);
-
-        try {
-            // This will need the BoardMetricsRepository to be injected
-            // For now, return a placeholder response
-            Map<String, Object> response = new HashMap<>();
-            response.put("message", "Metrics retrieval endpoint - implementation needed");
-            response.put("boardId", boardId);
-
-            // TODO: Implement actual metrics retrieval
-            // List<BoardMetrics> metrics = boardMetricsRepository.findByBoardId(boardId);
-            // return ResponseEntity.ok(metrics);
-
-            return ResponseEntity.ok().build();
-
-        } catch (Exception e) {
-            logger.error("Error retrieving metrics for board {}: {}", boardId, e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
-        }
-    }
 
     /**
      * Diagnostic endpoint to show all sprints and their metrics calculation status.

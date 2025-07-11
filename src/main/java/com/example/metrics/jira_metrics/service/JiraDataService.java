@@ -13,15 +13,13 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 /**
- * Service for processing and storing comprehensive JIRA data including board details,
- * sprints, issues, and calculating metrics insights.
- * Handles data transformation, persistence, and metrics calculation operations.
+ * Service for retrieving and storing JIRA data.
+ * Handles fetching data from JIRA API and storing it for metrics calculation.
  *
  * @author JIRA Metrics Team
  * @since 1.0.0
@@ -35,13 +33,11 @@ public class JiraDataService {
     private static final String DATA_TYPE_SPRINTS = "sprints";
     private static final String DATA_TYPE_BOARD_CONFIG = "board_config";
     private static final String DATA_TYPE_TEAMS = "teams";
-    private static final String DATA_TYPE_BOARD_DETAILS = "board_details";
 
     private final JiraClientService jiraClientService;
     private final BoardRepository boardRepository;
     private final TeamRepository teamRepository;
     private final JiraDataRepository jiraDataRepository;
-    private final BoardDetailsRepository boardDetailsRepository;
     private final SprintRepository sprintRepository;
     private final IssueRepository issueRepository;
     private final JiraMetricsCalculationService metricsCalculationService;
@@ -55,7 +51,6 @@ public class JiraDataService {
      * @param boardRepository Board repository
      * @param teamRepository Team repository
      * @param jiraDataRepository JIRA data repository
-     * @param boardDetailsRepository Board details repository
      * @param sprintRepository Sprint repository
      * @param issueRepository Issue repository
      * @param metricsCalculationService Metrics calculation service
@@ -66,7 +61,6 @@ public class JiraDataService {
                           BoardRepository boardRepository,
                           TeamRepository teamRepository,
                           JiraDataRepository jiraDataRepository,
-                          BoardDetailsRepository boardDetailsRepository,
                           SprintRepository sprintRepository,
                           IssueRepository issueRepository,
                           JiraMetricsCalculationService metricsCalculationService,
@@ -76,7 +70,6 @@ public class JiraDataService {
         this.boardRepository = boardRepository;
         this.teamRepository = teamRepository;
         this.jiraDataRepository = jiraDataRepository;
-        this.boardDetailsRepository = boardDetailsRepository;
         this.sprintRepository = sprintRepository;
         this.issueRepository = issueRepository;
         this.metricsCalculationService = metricsCalculationService;
@@ -108,6 +101,7 @@ public class JiraDataService {
 
     /**
      * Processes comprehensive data for a specific board including details, sprints, and issues.
+     * Now uses board ID directly for all JIRA API calls.
      *
      * @param board The board to process
      */
@@ -115,21 +109,26 @@ public class JiraDataService {
         logger.info("Processing comprehensive data for board: {} (ID: {})",
                    board.getBoardName(), board.getBoardId());
 
+        if (board.getBoardId() == null) {
+            logger.error("Board ID is null for board: {}. Cannot process data.", board.getBoardName());
+            return;
+        }
+
         LocalDateTime retrievalTime = LocalDateTime.now();
 
-        // Process enhanced board details
+        // Process enhanced board details using board ID
         processBoardDetailsEnhanced(board, retrievalTime);
 
-        // Process board configuration (existing)
+        // Process board configuration using board ID
         processBoardConfiguration(board, retrievalTime);
 
-        // Process sprints with detailed information
+        // Process sprints with detailed information using board ID
         processSprintsDetailed(board, retrievalTime);
 
-        // Process issues with comprehensive data
+        // Process issues with comprehensive data using board ID
         processIssuesDetailed(board, retrievalTime);
 
-        // Store raw data for backup (existing functionality)
+        // Store raw data for backup using board ID
         processBoardIssues(board, retrievalTime);
         processBoardSprints(board, retrievalTime);
 
@@ -139,102 +138,131 @@ public class JiraDataService {
 
     /**
      * Processes and stores enhanced board details including configuration and metadata.
-     * Now uses project key lookup instead of board ID.
+     * Uses board ID directly for JIRA API calls.
      *
      * @param board The board to process
      * @param retrievalTime The time of data retrieval
      */
     private void processBoardDetailsEnhanced(Board board, LocalDateTime retrievalTime) {
-        logger.info("Processing enhanced board details for board: {} (Project: {})",
-                   board.getBoardName(), board.getProjectKey());
+        logger.info("Processing enhanced board details for board: {} (ID: {})",
+                   board.getBoardName(), board.getBoardId());
 
         try {
-            // Use project key to get board configuration instead of board ID
-            var boardConfigData = jiraClientService.getBoardConfigurationByProjectKey(board.getProjectKey());
+            // Use board ID directly to get board configuration
+            var boardConfigData = jiraClientService.getBoardConfiguration(board.getBoardId());
 
             if (boardConfigData.isPresent()) {
                 var configJson = boardConfigData.get();
 
-                // Resolve actual board ID from JIRA response if not set
-                Long actualBoardId = board.getBoardId();
-                if (actualBoardId == null) {
-                    actualBoardId = jiraClientService.findBoardIdByProjectKey(board.getProjectKey()).orElse(null);
-                    if (actualBoardId != null) {
-                        board.setBoardId(actualBoardId);
-                        logger.info("Resolved board ID {} for project key: {}", actualBoardId, board.getProjectKey());
-                    }
-                }
+                // Extract and update board details in the Board entity itself
+                updateBoardWithConfiguration(board, configJson);
 
-                // Extract board details from configuration
-                var boardDetails = extractBoardDetails(actualBoardId, configJson);
-
-                // Save or update board details
-                var existing = boardDetailsRepository.findByBoardId(actualBoardId);
-                if (existing.isPresent()) {
-                    // Update existing details
-                    var updated = existing.get().withUpdates(
-                            boardDetails.boardType(),
-                            boardDetails.boardLocation(),
-                            boardDetails.filterId(),
-                            boardDetails.canEdit(),
-                            boardDetails.subQuery(),
-                            boardDetails.columnConfig(),
-                            boardDetails.estimationConfig(),
-                            boardDetails.rankingConfig()
-                    );
-                    boardDetailsRepository.save(updated);
-                    logger.debug("Updated board details for project key: {}", board.getProjectKey());
-                } else {
-                    boardDetailsRepository.save(boardDetails);
-                    logger.debug("Created new board details for project key: {}", board.getProjectKey());
-                }
+                // Save the updated board with configuration details
+                boardRepository.save(board);
 
                 // Store raw configuration data
                 var jiraData = JiraData.create(
-                        actualBoardId,
+                        board.getBoardId(),
                         null,
-                        DATA_TYPE_BOARD_DETAILS,
+                        DATA_TYPE_BOARD_CONFIG,
                         configJson.toString(),
                         retrievalTime,
                         1
                 );
                 jiraDataRepository.save(jiraData);
 
-                logger.info("Successfully processed enhanced board details for project key: {}",
-                           board.getProjectKey());
+                logger.info("Successfully processed enhanced board details for board ID: {}",
+                           board.getBoardId());
             } else {
-                logger.warn("No board configuration data retrieved for project key: {}",
-                           board.getProjectKey());
+                logger.warn("No board configuration data retrieved for board ID: {}",
+                           board.getBoardId());
             }
         } catch (Exception e) {
-            logger.error("Error processing board details for project key {}: {}",
-                        board.getProjectKey(), e.getMessage(), e);
+            logger.error("Error processing board details for board ID {}: {}",
+                        board.getBoardId(), e.getMessage(), e);
         }
     }
 
     /**
-     * Processes sprints with detailed information using project key lookup.
+     * Updates board entity with configuration data from JIRA.
+     *
+     * @param board The board to update
+     * @param configJson The configuration JSON from JIRA
+     */
+    private void updateBoardWithConfiguration(Board board, JsonNode configJson) {
+        try {
+            // Extract board type
+            String boardType = configJson.path("type").asText(null);
+            if (boardType != null && !boardType.isEmpty()) {
+                board.setBoardType(boardType.toLowerCase());
+            }
+
+            // Extract board location
+            String boardLocation = configJson.path("location").path("displayName").asText(null);
+            if (boardLocation != null && !boardLocation.isEmpty()) {
+                board.setBoardLocation(boardLocation);
+            }
+
+            // Extract filter ID
+            JsonNode filterNode = configJson.path("filter");
+            if (!filterNode.isMissingNode() && !filterNode.path("id").isMissingNode()) {
+                board.setFilterId(filterNode.path("id").asLong());
+            }
+
+            // Extract edit permissions
+            boolean canEdit = configJson.path("canEdit").asBoolean(false);
+            board.setCanEdit(canEdit);
+
+            // Extract sub query
+            String subQuery = configJson.path("subQuery").asText(null);
+            if (subQuery != null && !subQuery.isEmpty()) {
+                board.setSubQuery(subQuery);
+            }
+
+            // Extract column configuration
+            JsonNode columnConfigNode = configJson.path("columnConfig");
+            if (!columnConfigNode.isMissingNode()) {
+                board.setColumnConfig(columnConfigNode.toString());
+            }
+
+            // Extract estimation configuration
+            JsonNode estimationNode = configJson.path("estimation");
+            if (!estimationNode.isMissingNode()) {
+                board.setEstimationConfig(estimationNode.toString());
+            }
+
+            // Extract ranking configuration
+            JsonNode rankingNode = configJson.path("ranking");
+            if (!rankingNode.isMissingNode()) {
+                board.setRankingConfig(rankingNode.toString());
+            }
+
+            board.setUpdatedAt(LocalDateTime.now());
+
+            logger.debug("Updated board configuration for board ID: {}", board.getBoardId());
+
+        } catch (Exception e) {
+            logger.error("Error updating board with configuration for board ID {}: {}",
+                        board.getBoardId(), e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Processes sprints with detailed information using board ID directly.
      *
      * @param board The board to process
      * @param retrievalTime The time of data retrieval
      */
     private void processSprintsDetailed(Board board, LocalDateTime retrievalTime) {
-        logger.info("Processing detailed sprints for project key: {}", board.getProjectKey());
+        logger.info("Processing detailed sprints for board ID: {}", board.getBoardId());
 
         try {
-            // Use project key to get sprints instead of board ID
-            var sprintsData = jiraClientService.getBoardSprintsByProjectKey(board.getProjectKey());
+            // Use board ID directly to get sprints
+            var sprintsData = jiraClientService.getBoardSprints(board.getBoardId());
 
             if (sprintsData.isPresent()) {
                 var sprintsJson = sprintsData.get();
-
-                // Resolve board ID if needed
-                Long actualBoardId = board.getBoardId();
-                if (actualBoardId == null) {
-                    actualBoardId = jiraClientService.findBoardIdByProjectKey(board.getProjectKey()).orElse(null);
-                }
-
-                var sprints = extractSprintsFromJson(actualBoardId, sprintsJson);
+                var sprints = extractSprintsFromJson(board.getBoardId(), sprintsJson);
 
                 int processedCount = 0;
                 for (var sprint : sprints) {
@@ -260,10 +288,16 @@ public class JiraDataService {
                     }
                 }
 
+                // Update board sprint information
+                board.setHasSprints(processedCount > 0);
+                board.setSprintCount(processedCount);
+                board.setUpdatedAt(LocalDateTime.now());
+                boardRepository.save(board);
+
                 // Store raw sprint data for backup
                 String rawData = objectMapper.writeValueAsString(sprintsJson);
                 var jiraData = JiraData.create(
-                        actualBoardId,
+                        board.getBoardId(),
                         null,
                         DATA_TYPE_SPRINTS,
                         rawData,
@@ -272,25 +306,30 @@ public class JiraDataService {
                 );
                 jiraDataRepository.save(jiraData);
 
-                logger.info("Successfully processed {} sprints for project key: {}",
-                           processedCount, board.getProjectKey());
+                logger.info("Successfully processed {} sprints for board ID: {}",
+                           processedCount, board.getBoardId());
             } else {
-                logger.warn("No sprints data retrieved for project key: {}", board.getProjectKey());
+                logger.warn("No sprints data retrieved for board ID: {}", board.getBoardId());
+                // Update board to indicate no sprints
+                board.setHasSprints(false);
+                board.setSprintCount(0);
+                board.setUpdatedAt(LocalDateTime.now());
+                boardRepository.save(board);
             }
         } catch (Exception e) {
-            logger.error("Error processing sprints for project key {}: {}",
-                        board.getProjectKey(), e.getMessage(), e);
+            logger.error("Error processing sprints for board ID {}: {}",
+                        board.getBoardId(), e.getMessage(), e);
         }
     }
 
     /**
-     * Processes issues with comprehensive data using project key lookup.
+     * Processes issues with comprehensive data using board ID directly.
      *
      * @param board The board to process
      * @param retrievalTime The time of data retrieval
      */
     private void processIssuesDetailed(Board board, LocalDateTime retrievalTime) {
-        logger.info("Processing detailed issues for project key: {}", board.getProjectKey());
+        logger.info("Processing detailed issues for board ID: {}", board.getBoardId());
 
         try {
             int startAt = 0;
@@ -298,20 +337,14 @@ public class JiraDataService {
             int totalProcessed = 0;
             boolean hasMoreData = true;
 
-            // Resolve board ID if needed
-            Long actualBoardId = board.getBoardId();
-            if (actualBoardId == null) {
-                actualBoardId = jiraClientService.findBoardIdByProjectKey(board.getProjectKey()).orElse(null);
-            }
-
             while (hasMoreData) {
-                // Use project key to get issues instead of board ID
-                var issuesData = jiraClientService.getBoardIssuesByProjectKey(
-                        board.getProjectKey(), startAt, maxResults);
+                // Use board ID directly to get issues
+                var issuesData = jiraClientService.getBoardIssues(
+                        board.getBoardId(), startAt, maxResults);
 
                 if (issuesData.isPresent()) {
                     var issuesJson = issuesData.get();
-                    var issues = extractIssuesFromJson(actualBoardId, issuesJson);
+                    var issues = extractIssuesFromJson(board.getBoardId(), issuesJson);
 
                     for (var issue : issues) {
                         try {
@@ -330,7 +363,7 @@ public class JiraDataService {
                     if (startAt == 0) {
                         String rawData = objectMapper.writeValueAsString(issuesJson);
                         var jiraData = JiraData.create(
-                                actualBoardId,
+                                board.getBoardId(),
                                 null,
                                 DATA_TYPE_ISSUES,
                                 rawData,
@@ -354,11 +387,11 @@ public class JiraDataService {
                 }
             }
 
-            logger.info("Successfully processed {} issues for project key: {}",
-                       totalProcessed, board.getProjectKey());
+            logger.info("Successfully processed {} issues for board ID: {}",
+                       totalProcessed, board.getBoardId());
         } catch (Exception e) {
-            logger.error("Error processing issues for project key {}: {}",
-                        board.getProjectKey(), e.getMessage(), e);
+            logger.error("Error processing issues for board ID {}: {}",
+                        board.getBoardId(), e.getMessage(), e);
         }
     }
 
@@ -451,71 +484,69 @@ public class JiraDataService {
     }
 
     /**
-     * Processes board configuration data.
+     * Processes board configuration data using board ID directly.
      *
      * @param board         The board
      * @param retrievalTime The retrieval timestamp
      */
     private void processBoardConfiguration(Board board, LocalDateTime retrievalTime) {
-        logger.debug("Processing board configuration for project key: {}", board.getProjectKey());
+        logger.debug("Processing board configuration for board ID: {}", board.getBoardId());
 
-        // Use project key to get configuration instead of board ID
-        Optional<JsonNode> configData = jiraClientService.getBoardConfigurationByProjectKey(board.getProjectKey());
+        if (board.getBoardId() == null) {
+            logger.warn("Board ID is null, cannot process board configuration");
+            return;
+        }
+
+        // Use board ID directly to get configuration
+        Optional<JsonNode> configData = jiraClientService.getBoardConfiguration(board.getBoardId());
         if (configData.isPresent()) {
             try {
                 String rawData = objectMapper.writeValueAsString(configData.get());
 
-                // Resolve board ID if needed
-                Long actualBoardId = board.getBoardId();
-                if (actualBoardId == null) {
-                    actualBoardId = jiraClientService.findBoardIdByProjectKey(board.getProjectKey()).orElse(null);
-                }
-
-                JiraData jiraData = new JiraData(actualBoardId, DATA_TYPE_BOARD_CONFIG,
+                JiraData jiraData = new JiraData(board.getBoardId(), DATA_TYPE_BOARD_CONFIG,
                                                rawData, retrievalTime);
                 jiraDataRepository.save(jiraData);
 
-                logger.debug("Saved board configuration for project key: {}", board.getProjectKey());
+                logger.debug("Saved board configuration for board ID: {}", board.getBoardId());
             } catch (Exception e) {
-                logger.error("Error saving board configuration for project key: {}",
-                           board.getProjectKey(), e);
+                logger.error("Error saving board configuration for board ID: {}",
+                           board.getBoardId(), e);
             }
         } else {
-            logger.warn("No board configuration data retrieved for project key: {}", board.getProjectKey());
+            logger.warn("No board configuration data retrieved for board ID: {}", board.getBoardId());
         }
     }
 
     /**
-     * Processes board issues data with pagination using project key lookup.
+     * Processes board issues data with pagination using board ID directly.
      *
      * @param board The board
      * @param retrievalTime The retrieval timestamp
      */
     private void processBoardIssues(Board board, LocalDateTime retrievalTime) {
-        logger.debug("Processing board issues for project key: {}", board.getProjectKey());
+        logger.debug("Processing board issues for board ID: {}", board.getBoardId());
+
+        if (board.getBoardId() == null) {
+            logger.warn("Board ID is null, cannot process board issues");
+            return;
+        }
 
         int startAt = 0;
         int maxResults = 50;
         int totalProcessed = 0;
         boolean hasMoreData = true;
 
-        // Resolve board ID if needed
-        Long actualBoardId = board.getBoardId();
-        if (actualBoardId == null) {
-            actualBoardId = jiraClientService.findBoardIdByProjectKey(board.getProjectKey()).orElse(null);
-        }
-
         while (hasMoreData) {
-            // Use project key to get issues instead of board ID
-            Optional<JsonNode> issuesData = jiraClientService.getBoardIssuesByProjectKey(
-                    board.getProjectKey(), startAt, maxResults);
+            // Use board ID directly to get issues
+            Optional<JsonNode> issuesData = jiraClientService.getBoardIssues(
+                    board.getBoardId(), startAt, maxResults);
 
             if (issuesData.isPresent()) {
                 try {
                     JsonNode issues = issuesData.get();
                     String rawData = objectMapper.writeValueAsString(issues);
 
-                    JiraData jiraData = new JiraData(actualBoardId, DATA_TYPE_ISSUES,
+                    JiraData jiraData = new JiraData(board.getBoardId(), DATA_TYPE_ISSUES,
                                                    rawData, retrievalTime);
                     jiraData.setRecordCount(issues.path("issues").size());
                     jiraDataRepository.save(jiraData);
@@ -529,60 +560,59 @@ public class JiraDataService {
                     hasMoreData = (startAt + maxResultsFromResponse) < totalFromResponse;
                     startAt += maxResults;
 
-                    logger.debug("Processed {} issues for project key: {} (batch size: {})",
-                               totalProcessed, board.getProjectKey(), currentBatchSize);
+                    logger.debug("Processed {} issues for board ID: {} (batch size: {})",
+                               totalProcessed, board.getBoardId(), currentBatchSize);
 
                 } catch (Exception e) {
-                    logger.error("Error saving board issues for project key: {}",
-                               board.getProjectKey(), e);
+                    logger.error("Error saving board issues for board ID: {}",
+                               board.getBoardId(), e);
                     hasMoreData = false;
                 }
             } else {
-                logger.warn("No issues data retrieved for project key: {} at startAt: {}",
-                          board.getProjectKey(), startAt);
+                logger.warn("No issues data retrieved for board ID: {} at startAt: {}",
+                          board.getBoardId(), startAt);
                 hasMoreData = false;
             }
         }
 
-        logger.debug("Completed processing {} total issues for project key: {}",
-                   totalProcessed, board.getProjectKey());
+        logger.debug("Completed processing {} total issues for board ID: {}",
+                   totalProcessed, board.getBoardId());
     }
 
     /**
-     * Processes board sprints data using project key lookup.
+     * Processes board sprints data using board ID directly.
      *
      * @param board The board
      * @param retrievalTime The retrieval timestamp
      */
     private void processBoardSprints(Board board, LocalDateTime retrievalTime) {
-        logger.debug("Processing board sprints for project key: {}", board.getProjectKey());
+        logger.debug("Processing board sprints for board ID: {}", board.getBoardId());
 
-        // Use project key to get sprints instead of board ID
-        Optional<JsonNode> sprintsData = jiraClientService.getBoardSprintsByProjectKey(board.getProjectKey());
+        if (board.getBoardId() == null) {
+            logger.warn("Board ID is null, cannot process board sprints");
+            return;
+        }
+
+        // Use board ID directly to get sprints
+        Optional<JsonNode> sprintsData = jiraClientService.getBoardSprints(board.getBoardId());
         if (sprintsData.isPresent()) {
             try {
                 JsonNode sprints = sprintsData.get();
                 String rawData = objectMapper.writeValueAsString(sprints);
 
-                // Resolve board ID if needed
-                Long actualBoardId = board.getBoardId();
-                if (actualBoardId == null) {
-                    actualBoardId = jiraClientService.findBoardIdByProjectKey(board.getProjectKey()).orElse(null);
-                }
-
-                JiraData jiraData = new JiraData(actualBoardId, DATA_TYPE_SPRINTS,
+                JiraData jiraData = new JiraData(board.getBoardId(), DATA_TYPE_SPRINTS,
                                                rawData, retrievalTime);
                 jiraData.setRecordCount(sprints.path("values").size());
                 jiraDataRepository.save(jiraData);
 
-                logger.debug("Saved {} sprints for project key: {}",
-                           sprints.path("values").size(), board.getProjectKey());
+                logger.debug("Saved {} sprints for board ID: {}",
+                           sprints.path("values").size(), board.getBoardId());
             } catch (Exception e) {
-                logger.error("Error saving board sprints for project key: {}",
-                           board.getProjectKey(), e);
+                logger.error("Error saving board sprints for board ID: {}",
+                           board.getBoardId(), e);
             }
         } else {
-            logger.warn("No sprints data retrieved for project key: {}", board.getProjectKey());
+            logger.warn("No sprints data retrieved for board ID: {}", board.getBoardId());
         }
     }
 
@@ -664,60 +694,6 @@ public class JiraDataService {
         }
     }
 
-    /**
-     * Extracts board details from JSON configuration data.
-     *
-     * @param boardId The board ID
-     * @param configJson The JSON configuration data
-     * @return BoardDetails entity
-     */
-    private BoardDetails extractBoardDetails(Long boardId, JsonNode configJson) {
-        try {
-            String boardType = configJson.path("type").asText("unknown");
-            String boardLocation = configJson.path("location").path("type").asText("unknown");
-            Long filterId = configJson.path("filter").path("id").isNull() ? null : configJson.path("filter").path("id").asLong();
-            boolean canEdit = configJson.path("canEdit").asBoolean(false);
-            String subQuery = configJson.path("subQuery").asText(null);
-
-            // Extract column configuration
-            String columnConfig = null;
-            JsonNode columnConfigNode = configJson.path("columnConfig");
-            if (!columnConfigNode.isMissingNode()) {
-                columnConfig = columnConfigNode.toString();
-            }
-
-            // Extract estimation configuration
-            String estimationConfig = null;
-            JsonNode estimationNode = configJson.path("estimation");
-            if (!estimationNode.isMissingNode()) {
-                estimationConfig = estimationNode.toString();
-            }
-
-            // Extract ranking configuration
-            String rankingConfig = null;
-            JsonNode rankingNode = configJson.path("ranking");
-            if (!rankingNode.isMissingNode()) {
-                rankingConfig = rankingNode.toString();
-            }
-
-            return BoardDetails.create(
-                    boardId,
-                    boardType,
-                    boardLocation,
-                    filterId,
-                    canEdit,
-                    subQuery,
-                    columnConfig,
-                    estimationConfig,
-                    rankingConfig
-            );
-
-        } catch (Exception e) {
-            logger.error("Error extracting board details from JSON: {}", e.getMessage(), e);
-            // Return minimal board details if extraction fails
-            return BoardDetails.create(boardId, "unknown", "unknown", null, false, null, null, null, null);
-        }
-    }
 
     /**
      * Extracts sprints from JSON data.
