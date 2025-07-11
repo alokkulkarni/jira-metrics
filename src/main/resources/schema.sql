@@ -185,11 +185,8 @@ CREATE INDEX IF NOT EXISTS idx_board_metrics_board_id ON board_metrics(board_id)
 CREATE INDEX IF NOT EXISTS idx_board_metrics_sprint_id ON board_metrics(sprint_id);
 CREATE INDEX IF NOT EXISTS idx_board_metrics_period ON board_metrics(metric_period_start, metric_period_end);
 
--- Insert sample board configurations
-INSERT INTO boards (board_id, board_name, project_key)
-VALUES
-    (1, 'Metrics Sprint 2', 'METRICS')
-ON CONFLICT (board_id) DO NOTHING;
+-- Note: Board data is now automatically synchronized from JIRA API
+-- No manual board insertion needed - boards are fetched and maintained automatically
 
 -- Grant permissions (adjust user as needed)
 -- GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO jira_user;

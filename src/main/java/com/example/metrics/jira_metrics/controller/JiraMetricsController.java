@@ -9,6 +9,7 @@ import com.example.metrics.jira_metrics.repository.TeamRepository;
 import com.example.metrics.jira_metrics.service.JiraClientService;
 import com.example.metrics.jira_metrics.service.JiraDataScheduledJob;
 import com.example.metrics.jira_metrics.service.JiraDataService;
+import com.example.metrics.jira_metrics.service.BoardSynchronizationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -37,6 +38,7 @@ public class JiraMetricsController {
     private final JiraDataService jiraDataService;
     private final JiraDataScheduledJob jiraDataScheduledJob;
     private final JiraClientService jiraClientService;
+    private final BoardSynchronizationService boardSynchronizationService;
 
     /**
      * Constructor for JiraMetricsController.
@@ -46,17 +48,20 @@ public class JiraMetricsController {
      * @param jiraDataService        JIRA data service
      * @param jiraDataScheduledJob   Scheduled job service
      * @param jiraClientService      JIRA client service
+     * @param boardSynchronizationService Board synchronization service
      */
     public JiraMetricsController(BoardRepository boardRepository,
                                 TeamRepository teamRepository,
                                 JiraDataService jiraDataService,
                                 JiraDataScheduledJob jiraDataScheduledJob,
-                                JiraClientService jiraClientService) {
+                                JiraClientService jiraClientService,
+                                BoardSynchronizationService boardSynchronizationService) {
         this.boardRepository = boardRepository;
         this.teamRepository = teamRepository;
         this.jiraDataService = jiraDataService;
         this.jiraDataScheduledJob = jiraDataScheduledJob;
         this.jiraClientService = jiraClientService;
+        this.boardSynchronizationService = boardSynchronizationService;
     }
 
     /**
@@ -433,6 +438,72 @@ public class JiraMetricsController {
             logger.error("Error running diagnostics for board {}: {}", boardId, e.getMessage(), e);
             Map<String, Object> error = Map.of(
                 "error", "Error running diagnostics: " + e.getMessage(),
+                "timestamp", System.currentTimeMillis()
+            );
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
+        }
+    }
+
+    /**
+     * Manually triggers board synchronization from JIRA.
+     * This endpoint allows immediate synchronization of all boards.
+     *
+     * @return ResponseEntity with synchronization status
+     */
+    @PostMapping("/boards/synchronize")
+    public ResponseEntity<Map<String, Object>> synchronizeBoards() {
+        logger.info("Manual board synchronization triggered via API");
+
+        Map<String, Object> response = new HashMap<>();
+
+        try {
+            int synchronizedCount = boardSynchronizationService.synchronizeBoardsManually();
+
+            response.put("status", "SUCCESS");
+            response.put("message", "Board synchronization completed successfully");
+            response.put("boardsProcessed", synchronizedCount);
+            response.put("timestamp", System.currentTimeMillis());
+
+            logger.info("Successfully synchronized {} boards", synchronizedCount);
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            logger.error("Error during manual board synchronization: {}", e.getMessage(), e);
+            response.put("status", "ERROR");
+            response.put("message", "Error synchronizing boards: " + e.getMessage());
+            response.put("timestamp", System.currentTimeMillis());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
+        }
+    }
+
+    /**
+     * Gets board synchronization status and statistics.
+     *
+     * @return Board synchronization information
+     */
+    @GetMapping("/boards/sync-status")
+    public ResponseEntity<Map<String, Object>> getBoardSyncStatus() {
+        logger.debug("Retrieving board synchronization status");
+
+        try {
+            Map<String, Object> status = new HashMap<>();
+
+            long activeBoardCount = boardSynchronizationService.getActiveBoardCount();
+            var lastSyncTime = boardSynchronizationService.getLastSynchronizationTime();
+
+            status.put("activeBoardCount", activeBoardCount);
+            status.put("lastSynchronizationTime", lastSyncTime);
+            status.put("nextScheduledSync", "Every 2 hours");
+            status.put("status", "OPERATIONAL");
+            status.put("timestamp", System.currentTimeMillis());
+
+            return ResponseEntity.ok(status);
+
+        } catch (Exception e) {
+            logger.error("Error retrieving board sync status: {}", e.getMessage(), e);
+            Map<String, Object> error = Map.of(
+                "status", "ERROR",
+                "message", "Error retrieving sync status: " + e.getMessage(),
                 "timestamp", System.currentTimeMillis()
             );
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
