@@ -11,34 +11,74 @@ import java.util.Optional;
 
 /**
  * Repository interface for Board entity operations.
- * Provides methods to retrieve board configurations for the scheduled job.
+ * Provides methods for board data access and queries.
+ *
+ * @author JIRA Metrics Team
+ * @since 1.0.0
  */
 @Repository
 public interface BoardRepository extends CrudRepository<Board, Long> {
 
     /**
-     * Finds all active boards for processing.
-     *
-     * @return List of active boards
-     */
-    @Query("SELECT * FROM boards WHERE is_active = true")
-    List<Board> findAllActiveBoards();
-
-    /**
      * Finds a board by its JIRA board ID.
      *
      * @param boardId The JIRA board ID
-     * @return Optional board entity
+     * @return Optional containing the board if found
      */
-    @Query("SELECT * FROM boards WHERE board_id = :boardId")
-    Optional<Board> findByBoardId(@Param("boardId") Long boardId);
+    Optional<Board> findByBoardId(Long boardId);
 
     /**
-     * Finds boards by project key.
+     * Finds all active boards.
+     *
+     * @return List of active boards
+     */
+    List<Board> findByIsActiveTrue();
+
+    /**
+     * Finds all active boards.
+     * Alias method for backward compatibility.
+     *
+     * @return List of active boards
+     */
+    default List<Board> findAllActiveBoards() {
+        return findByIsActiveTrue();
+    }
+
+    /**
+     * Finds all boards by project key.
      *
      * @param projectKey The project key
      * @return List of boards for the project
      */
-    @Query("SELECT * FROM boards WHERE project_key = :projectKey AND is_active = true")
-    List<Board> findByProjectKeyAndIsActiveTrue(@Param("projectKey") String projectKey);
+    List<Board> findByProjectKey(String projectKey);
+
+    /**
+     * Finds all active boards by project key.
+     *
+     * @param projectKey The project key
+     * @return List of active boards for the project
+     */
+    List<Board> findByProjectKeyAndIsActiveTrue(String projectKey);
+
+    /**
+     * Finds all boards by board type.
+     *
+     * @param boardType The board type
+     * @return List of boards of the specified type
+     */
+    List<Board> findByBoardType(String boardType);
+
+    /**
+     * Finds all boards that have sprints enabled.
+     *
+     * @return List of sprint-enabled boards
+     */
+    List<Board> findByHasSprintsTrue();
+
+    /**
+     * Finds all boards that don't have sprints enabled.
+     *
+     * @return List of non-sprint boards
+     */
+    List<Board> findByHasSprintsFalse();
 }

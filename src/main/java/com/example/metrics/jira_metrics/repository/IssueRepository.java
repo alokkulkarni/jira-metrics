@@ -6,13 +6,13 @@ import org.springframework.data.repository.CrudRepository;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
 /**
  * Repository interface for Issue entity operations.
- * Provides methods to store and retrieve issue data with filtering and analytics support.
+ * Provides methods for issue data access and queries.
+ * Supports both sprint-based and non-sprint boards.
  *
  * @author JIRA Metrics Team
  * @since 1.0.0
@@ -21,119 +21,150 @@ import java.util.Optional;
 public interface IssueRepository extends CrudRepository<Issue, Long> {
 
     /**
-     * Finds issue by issue ID.
+     * Finds an issue by its JIRA issue ID.
      *
      * @param issueId The JIRA issue ID
-     * @return Optional containing issue if found
+     * @return Optional containing the issue if found
      */
-    @Query("SELECT * FROM issues WHERE issue_id = :issueId")
-    Optional<Issue> findByIssueId(@Param("issueId") String issueId);
+    Optional<Issue> findByIssueId(String issueId);
 
     /**
-     * Finds issue by issue key.
+     * Finds an issue by its JIRA issue key.
      *
      * @param issueKey The JIRA issue key (e.g., "PROJ-123")
-     * @return Optional containing issue if found
+     * @return Optional containing the issue if found
      */
-    @Query("SELECT * FROM issues WHERE issue_key = :issueKey")
-    Optional<Issue> findByIssueKey(@Param("issueKey") String issueKey);
+    Optional<Issue> findByIssueKey(String issueKey);
 
     /**
      * Finds all issues for a specific board.
+     * Works for both sprint-based and non-sprint boards.
      *
      * @param boardId The board ID
      * @return List of issues for the board
      */
-    @Query("SELECT * FROM issues WHERE board_id = :boardId ORDER BY created_date DESC")
-    List<Issue> findByBoardId(@Param("boardId") Long boardId);
+    List<Issue> findByBoardId(Long boardId);
 
     /**
      * Finds all issues for a specific sprint.
+     * Only applicable to sprint-based boards.
      *
      * @param sprintId The sprint ID
-     * @return List of issues for the sprint
+     * @return List of issues in the sprint
      */
-    @Query("SELECT * FROM issues WHERE sprint_id = :sprintId ORDER BY created_date DESC")
-    List<Issue> findBySprintId(@Param("sprintId") Long sprintId);
+    List<Issue> findBySprintId(Long sprintId);
 
     /**
-     * Finds resolved issues for a sprint.
-     *
-     * @param sprintId The sprint ID
-     * @return List of resolved issues
-     */
-    @Query("SELECT * FROM issues WHERE sprint_id = :sprintId AND resolved_date IS NOT NULL ORDER BY resolved_date DESC")
-    List<Issue> findResolvedIssuesInSprint(@Param("sprintId") Long sprintId);
-
-    /**
-     * Finds defects (bugs) for a sprint.
-     *
-     * @param sprintId The sprint ID
-     * @return List of defect issues
-     */
-    @Query("SELECT * FROM issues WHERE sprint_id = :sprintId AND UPPER(issue_type) = 'BUG' ORDER BY created_date DESC")
-    List<Issue> findDefectsInSprint(@Param("sprintId") Long sprintId);
-
-    /**
-     * Finds issues by assignee for a board.
+     * Finds all issues for a board with a specific status.
      *
      * @param boardId The board ID
+     * @param status The issue status
+     * @return List of issues matching the criteria
+     */
+    List<Issue> findByBoardIdAndStatus(Long boardId, String status);
+
+    /**
+     * Finds all issues for a sprint with a specific status.
+     *
+     * @param sprintId The sprint ID
+     * @param status The issue status
+     * @return List of issues matching the criteria
+     */
+    List<Issue> findBySprintIdAndStatus(Long sprintId, String status);
+
+    /**
+     * Finds all issues assigned to a specific user.
+     *
      * @param assigneeAccountId The assignee's account ID
      * @return List of issues assigned to the user
      */
-    @Query("SELECT * FROM issues WHERE board_id = :boardId AND assignee_account_id = :assigneeAccountId ORDER BY created_date DESC")
-    List<Issue> findByBoardIdAndAssignee(@Param("boardId") Long boardId, @Param("assigneeAccountId") String assigneeAccountId);
+    List<Issue> findByAssigneeAccountId(String assigneeAccountId);
 
     /**
-     * Finds issues created within a date range.
+     * Finds all issues for a board that are not linked to any sprint.
+     * Useful for Kanban boards or unassigned issues.
      *
      * @param boardId The board ID
-     * @param startDate Start of date range
-     * @param endDate End of date range
-     * @return List of issues created in the date range
+     * @return List of issues without sprint assignment
      */
-    @Query("SELECT * FROM issues WHERE board_id = :boardId AND created_date BETWEEN :startDate AND :endDate ORDER BY created_date DESC")
-    List<Issue> findIssuesCreatedInRange(@Param("boardId") Long boardId,
-                                       @Param("startDate") LocalDateTime startDate,
-                                       @Param("endDate") LocalDateTime endDate);
+    List<Issue> findByBoardIdAndSprintIdIsNull(Long boardId);
 
     /**
-     * Finds issues resolved within a date range.
+     * Finds all issues for a board that are linked to sprints.
+     * Useful for Scrum boards.
      *
      * @param boardId The board ID
-     * @param startDate Start of date range
-     * @param endDate End of date range
-     * @return List of issues resolved in the date range
+     * @return List of issues with sprint assignment
      */
-    @Query("SELECT * FROM issues WHERE board_id = :boardId AND resolved_date BETWEEN :startDate AND :endDate ORDER BY resolved_date DESC")
-    List<Issue> findIssuesResolvedInRange(@Param("boardId") Long boardId,
-                                        @Param("startDate") LocalDateTime startDate,
-                                        @Param("endDate") LocalDateTime endDate);
+    List<Issue> findByBoardIdAndSprintIdIsNotNull(Long boardId);
 
     /**
-     * Counts total story points for a sprint.
+     * Counts the number of issues for a specific board.
      *
-     * @param sprintId The sprint ID
-     * @return Total story points in the sprint
+     * @param boardId The board ID
+     * @return Number of issues for the board
      */
-    @Query("SELECT COALESCE(SUM(story_points), 0) FROM issues WHERE sprint_id = :sprintId")
-    Double getTotalStoryPointsInSprint(@Param("sprintId") Long sprintId);
+    long countByBoardId(Long boardId);
 
     /**
-     * Counts completed story points for a sprint.
+     * Counts the number of issues for a specific sprint.
      *
      * @param sprintId The sprint ID
-     * @return Completed story points in the sprint
+     * @return Number of issues in the sprint
      */
-    @Query("SELECT COALESCE(SUM(story_points), 0) FROM issues WHERE sprint_id = :sprintId AND resolved_date IS NOT NULL")
-    Double getCompletedStoryPointsInSprint(@Param("sprintId") Long sprintId);
+    long countBySprintId(Long sprintId);
 
     /**
-     * Counts defects for a sprint.
+     * Counts issues by board and status.
+     *
+     * @param boardId The board ID
+     * @param status The issue status
+     * @return Number of issues matching the criteria
+     */
+    long countByBoardIdAndStatus(Long boardId, String status);
+
+    /**
+     * Finds issues by board and issue type.
+     *
+     * @param boardId The board ID
+     * @param issueType The issue type (e.g., "Story", "Bug", "Task")
+     * @return List of issues matching the criteria
+     */
+    List<Issue> findByBoardIdAndIssueType(Long boardId, String issueType);
+
+    /**
+     * Finds all issues with story points for a board.
+     * Useful for velocity calculations.
+     *
+     * @param boardId The board ID
+     * @return List of issues that have story points assigned
+     */
+    @Query("SELECT * FROM issues WHERE board_id = :boardId AND story_points IS NOT NULL AND story_points > 0")
+    List<Issue> findByBoardIdWithStoryPoints(@Param("boardId") Long boardId);
+
+    /**
+     * Finds all issues with story points for a sprint.
+     * Useful for sprint velocity calculations.
      *
      * @param sprintId The sprint ID
-     * @return Number of defects in the sprint
+     * @return List of issues that have story points assigned
      */
-    @Query("SELECT COUNT(*) FROM issues WHERE sprint_id = :sprintId AND UPPER(issue_type) = 'BUG'")
-    Long getDefectCountInSprint(@Param("sprintId") Long sprintId);
+    @Query("SELECT * FROM issues WHERE sprint_id = :sprintId AND story_points IS NOT NULL AND story_points > 0")
+    List<Issue> findBySprintIdWithStoryPoints(@Param("sprintId") Long sprintId);
+
+    /**
+     * Deletes all issues for a specific board.
+     * Useful for cleanup operations.
+     *
+     * @param boardId The board ID
+     */
+    void deleteByBoardId(Long boardId);
+
+    /**
+     * Deletes all issues for a specific sprint.
+     * Useful for cleanup operations.
+     *
+     * @param sprintId The sprint ID
+     */
+    void deleteBySprintId(Long sprintId);
 }
