@@ -45,6 +45,10 @@ public class JiraClientService {
     private final Map<String, Long> boardIdCache = new ConcurrentHashMap<>();
     private final Map<String, Long> projectKeyToBoardIdCache = new ConcurrentHashMap<>();
 
+    // Constants for pagination
+    private static final int MAX_RESULTS_PER_PAGE = 50; // JIRA default maximum
+    private static final int MAX_BOARDS_LIMIT = 10000; // Safety limit to prevent infinite loops
+
     /**
      * Constructor for JiraClientService.
      *
@@ -93,14 +97,98 @@ public class JiraClientService {
     }
 
     /**
-     * Retrieves all boards from JIRA to enable lookup by project key or board name.
+     * Retrieves all boards from JIRA with pagination support.
+     * Handles JIRA's 50-record limit by making multiple API calls to fetch all boards.
      *
-     * @return Optional JSON response containing all boards
+     * @return Optional JSON response containing all boards consolidated from all pages
      */
     public Optional<JsonNode> getAllBoards() {
         try {
-            String endpoint = "/rest/agile/1.0/board";
-            logger.debug("Fetching all boards from JIRA");
+            logger.debug("Fetching all boards from JIRA with pagination support");
+
+            var allBoards = new java.util.ArrayList<JsonNode>();
+            int startAt = 0;
+            int totalBoardsRetrieved = 0;
+            boolean hasMorePages = true;
+            int pageCount = 0;
+
+            while (hasMorePages && totalBoardsRetrieved < MAX_BOARDS_LIMIT) {
+                pageCount++;
+                logger.debug("Fetching boards page {} (starting at index {})", pageCount, startAt);
+
+                Optional<JsonNode> pageResponse = fetchBoardsPage(startAt, MAX_RESULTS_PER_PAGE);
+
+                if (pageResponse.isEmpty()) {
+                    logger.warn("Failed to fetch boards page {} starting at index {}", pageCount, startAt);
+                    break;
+                }
+
+                JsonNode page = pageResponse.get();
+                JsonNode values = page.path("values");
+                int currentPageSize = values.size();
+
+                // Add boards from current page to our collection
+                for (JsonNode board : values) {
+                    allBoards.add(board);
+                }
+
+                totalBoardsRetrieved += currentPageSize;
+
+                // Check pagination metadata
+                int total = page.path("total").asInt(-1);
+                boolean isLast = page.path("isLast").asBoolean(true);
+
+                logger.debug("Page {}: retrieved {} boards, total so far: {}, page marked as last: {}",
+                           pageCount, currentPageSize, totalBoardsRetrieved, isLast);
+
+                // Determine if there are more pages
+                if (isLast || currentPageSize == 0 || (total > 0 && totalBoardsRetrieved >= total)) {
+                    hasMorePages = false;
+                } else {
+                    startAt += currentPageSize;
+                }
+
+                // Safety check to prevent infinite loops
+                if (pageCount > 200) { // Max 200 pages = 10,000 boards
+                    logger.warn("Reached maximum page limit (200), stopping pagination");
+                    break;
+                }
+            }
+
+            logger.info("Successfully retrieved {} boards from {} pages", totalBoardsRetrieved, pageCount);
+
+            // Create consolidated response
+            var consolidatedResponse = objectMapper.createObjectNode();
+            consolidatedResponse.put("startAt", 0);
+            consolidatedResponse.put("maxResults", totalBoardsRetrieved);
+            consolidatedResponse.put("total", totalBoardsRetrieved);
+            consolidatedResponse.put("isLast", true);
+            consolidatedResponse.set("values", objectMapper.valueToTree(allBoards));
+
+            return Optional.of(consolidatedResponse);
+
+        } catch (RestClientException e) {
+            handleRestClientException(e, "fetching all boards with pagination");
+            return Optional.empty();
+        } catch (Exception e) {
+            logger.error("Unexpected error fetching all boards with pagination", e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Fetches a single page of boards from JIRA API.
+     *
+     * @param startAt starting index for pagination
+     * @param maxResults maximum number of results per page
+     * @return Optional JSON response for the requested page
+     */
+    private Optional<JsonNode> fetchBoardsPage(int startAt, int maxResults) {
+        try {
+            String endpoint = String.format("/rest/agile/1.0/board?startAt=%d&maxResults=%d",
+                                          startAt, maxResults);
+
+            logger.debug("Fetching boards page from endpoint: {}", endpoint);
 
             HttpEntity<String> requestEntity = new HttpEntity<>(defaultHeaders);
             ResponseEntity<String> response = restTemplate.exchange(
@@ -111,15 +199,22 @@ public class JiraClientService {
             );
 
             JsonNode jsonNode = objectMapper.readTree(response.getBody());
-            logger.debug("Successfully retrieved {} boards from JIRA",
-                        jsonNode.path("values").size());
+
+            int pageSize = jsonNode.path("values").size();
+            int total = jsonNode.path("total").asInt(-1);
+            boolean isLast = jsonNode.path("isLast").asBoolean(true);
+
+            logger.debug("Retrieved page with {} boards (total: {}, isLast: {})",
+                        pageSize, total, isLast);
+
             return Optional.of(jsonNode);
 
         } catch (RestClientException e) {
-            handleRestClientException(e, "fetching all boards");
+            logger.error("REST client error fetching boards page at startAt={}: {}",
+                        startAt, e.getMessage());
             return Optional.empty();
         } catch (Exception e) {
-            logger.error("Unexpected error fetching all boards", e);
+            logger.error("Unexpected error fetching boards page at startAt={}", startAt, e);
             return Optional.empty();
         }
     }
