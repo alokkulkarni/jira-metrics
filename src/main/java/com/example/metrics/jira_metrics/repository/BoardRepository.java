@@ -81,4 +81,11 @@ public interface BoardRepository extends CrudRepository<Board, Long> {
      * @return List of non-sprint boards
      */
     List<Board> findByHasSprintsFalse();
+
+    /**
+     * Finds all inactive boards.
+     *
+     * @return List of inactive boards
+     */
+    List<Board> findByIsActiveFalse();
 }

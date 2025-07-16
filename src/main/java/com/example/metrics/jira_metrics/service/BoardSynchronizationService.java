@@ -78,6 +78,7 @@ public class BoardSynchronizationService {
     /**
      * Core method that performs the board synchronization logic.
      * Fetches all boards from JIRA API and updates the local database.
+     * Uses upsert strategy to handle existing boards gracefully.
      *
      * @return Number of boards processed
      */
@@ -104,30 +105,29 @@ public class BoardSynchronizationService {
             int newBoardsCount = 0;
             int updatedBoardsCount = 0;
 
-            // Process each board from JIRA
+            // Process each board from JIRA using upsert strategy
             for (JsonNode boardNode : boardValues) {
                 try {
                     Board processedBoard = processBoardFromJson(boardNode);
                     if (processedBoard != null) {
                         activeBoardIds.add(processedBoard.getBoardId());
 
-                        Optional<Board> existingBoard = boardRepository.findByBoardId(processedBoard.getBoardId());
-                        if (existingBoard.isPresent()) {
-                            // Update existing board
-                            Board updated = updateExistingBoard(existingBoard.get(), processedBoard);
-                            boardRepository.save(updated);
-                            updatedBoardsCount++;
-                            logger.debug("Updated board: {} (ID: {})", updated.getBoardName(), updated.getBoardId());
-                        } else {
-                            // Create new board
-                            boardRepository.save(processedBoard);
+                        // Use upsert strategy to handle duplicates gracefully
+                        UpsertResult result = upsertBoard(processedBoard);
+                        if (result.isNewBoard()) {
                             newBoardsCount++;
-                            logger.debug("Created new board: {} (ID: {})", processedBoard.getBoardName(), processedBoard.getBoardId());
+                            logger.debug("Created new board: {} (ID: {})",
+                                       processedBoard.getBoardName(), processedBoard.getBoardId());
+                        } else {
+                            updatedBoardsCount++;
+                            logger.debug("Updated existing board: {} (ID: {})",
+                                       processedBoard.getBoardName(), processedBoard.getBoardId());
                         }
                         processedCount++;
                     }
                 } catch (Exception e) {
-                    logger.error("Error processing individual board: {}", boardNode, e);
+                    logger.error("Error processing individual board from JIRA: {}", e.getMessage(), e);
+                    // Continue processing other boards even if one fails
                 }
             }
 
@@ -140,8 +140,87 @@ public class BoardSynchronizationService {
             return processedCount;
 
         } catch (Exception e) {
-            logger.error("Error during board synchronization", e);
+            logger.error("Error during board synchronization: {}", e.getMessage(), e);
             return 0;
+        }
+    }
+
+    /**
+     * Performs upsert operation for a board (insert if new, update if exists).
+     * This method handles duplicate key violations gracefully.
+     *
+     * @param board the board to upsert
+     * @return UpsertResult indicating whether board was new or updated
+     */
+    private UpsertResult upsertBoard(Board board) {
+        try {
+            // First, try to find existing board
+            Optional<Board> existingBoard = boardRepository.findByBoardId(board.getBoardId());
+
+            if (existingBoard.isPresent()) {
+                // Update existing board
+                Board updated = updateExistingBoard(existingBoard.get(), board);
+                boardRepository.save(updated);
+                return new UpsertResult(false, updated);
+            } else {
+                // Try to insert new board
+                try {
+                    Board saved = boardRepository.save(board);
+                    return new UpsertResult(true, saved);
+                } catch (Exception e) {
+                    // Handle race condition: another thread might have inserted the board
+                    if (isDuplicateKeyException(e)) {
+                        logger.debug("Duplicate key detected during insert, attempting update for board ID: {}",
+                                   board.getBoardId());
+
+                        // Try to find and update the board that was inserted by another thread
+                        Optional<Board> raceConditionBoard = boardRepository.findByBoardId(board.getBoardId());
+                        if (raceConditionBoard.isPresent()) {
+                            Board updated = updateExistingBoard(raceConditionBoard.get(), board);
+                            boardRepository.save(updated);
+                            return new UpsertResult(false, updated);
+                        } else {
+                            throw new IllegalStateException("Board not found after duplicate key exception", e);
+                        }
+                    } else {
+                        throw e; // Re-throw if it's not a duplicate key issue
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Failed to upsert board ID {}: {}", board.getBoardId(), e.getMessage(), e);
+            throw new RuntimeException("Board upsert failed", e);
+        }
+    }
+
+    /**
+     * Checks if an exception is caused by a duplicate key violation.
+     *
+     * @param exception the exception to check
+     * @return true if it's a duplicate key exception
+     */
+    private boolean isDuplicateKeyException(Exception exception) {
+        String message = exception.getMessage();
+        if (message == null) {
+            return false;
+        }
+
+        String lowerMessage = message.toLowerCase();
+        return lowerMessage.contains("duplicate key") ||
+               lowerMessage.contains("unique constraint") ||
+               lowerMessage.contains("boards_board_id_key") ||
+               lowerMessage.contains("unique violation");
+    }
+
+    /**
+     * Result of an upsert operation.
+     *
+     * @param isNewBoard true if the board was newly created, false if updated
+     * @param board the resulting board entity
+     */
+    private record UpsertResult(boolean isNewBoard, Board board) {
+        public boolean isNewBoard() {
+            return isNewBoard;
         }
     }
 

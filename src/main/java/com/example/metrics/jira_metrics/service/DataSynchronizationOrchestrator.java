@@ -1,7 +1,11 @@
 package com.example.metrics.jira_metrics.service;
 
 import com.example.metrics.jira_metrics.entity.Board;
+import com.example.metrics.jira_metrics.entity.Sprint;
+import com.example.metrics.jira_metrics.entity.Issue;
 import com.example.metrics.jira_metrics.repository.BoardRepository;
+import com.example.metrics.jira_metrics.repository.SprintRepository;
+import com.example.metrics.jira_metrics.repository.IssueRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -29,6 +33,8 @@ public class DataSynchronizationOrchestrator {
     private final SprintSynchronizationService sprintSynchronizationService;
     private final IssueSynchronizationService issueSynchronizationService;
     private final BoardRepository boardRepository;
+    private final SprintRepository sprintRepository;
+    private final IssueRepository issueRepository;
 
     /**
      * Constructor for DataSynchronizationOrchestrator.
@@ -37,16 +43,22 @@ public class DataSynchronizationOrchestrator {
      * @param sprintSynchronizationService Service for sprint synchronization
      * @param issueSynchronizationService Service for issue synchronization
      * @param boardRepository Repository for board operations
+     * @param sprintRepository Repository for sprint operations
+     * @param issueRepository Repository for issue operations
      */
     public DataSynchronizationOrchestrator(
             BoardSynchronizationService boardSynchronizationService,
             SprintSynchronizationService sprintSynchronizationService,
             IssueSynchronizationService issueSynchronizationService,
-            BoardRepository boardRepository) {
+            BoardRepository boardRepository,
+            SprintRepository sprintRepository,
+            IssueRepository issueRepository) {
         this.boardSynchronizationService = boardSynchronizationService;
         this.sprintSynchronizationService = sprintSynchronizationService;
         this.issueSynchronizationService = issueSynchronizationService;
         this.boardRepository = boardRepository;
+        this.sprintRepository = sprintRepository;
+        this.issueRepository = issueRepository;
     }
 
     /**
@@ -130,18 +142,24 @@ public class DataSynchronizationOrchestrator {
     }
 
     /**
-     * Synchronizes sprints for all boards that have sprints enabled.
+     * Synchronizes sprints for all active boards that have sprints enabled.
+     * Only processes boards marked as is_active = true in the database.
      *
      * @return Total number of sprints synchronized
      */
     private int synchronizeSprintsForAllBoards() {
-        List<Board> allBoards = boardRepository.findByIsActiveTrue();
-        int totalSprintCount = 0;
+        List<Board> activeBoards = boardRepository.findByIsActiveTrue();
+        logger.info("Found {} active boards for sprint synchronization", activeBoards.size());
 
-        for (Board board : allBoards) {
+        int totalSprintCount = 0;
+        int boardsWithSprints = 0;
+        int boardsSkipped = 0;
+
+        for (Board board : activeBoards) {
             try {
+                // Only process boards that are active AND have sprints enabled
                 if (board.getHasSprints() != null && board.getHasSprints()) {
-                    logger.debug("Synchronizing sprints for board: {} (ID: {})",
+                    logger.debug("Synchronizing sprints for active board: {} (ID: {})",
                                board.getBoardName(), board.getBoardId());
 
                     int sprintCount = sprintSynchronizationService.synchronizeSprintsForBoard(
@@ -150,37 +168,50 @@ public class DataSynchronizationOrchestrator {
                     );
 
                     totalSprintCount += sprintCount;
+                    boardsWithSprints++;
 
                     // Update board sprint count
                     board.setSprintCount(sprintCount);
                     boardRepository.save(board);
 
                 } else {
-                    logger.debug("Board {} does not have sprints enabled, skipping", board.getBoardName());
+                    logger.debug("Skipping sprint sync for board {} - no sprints enabled or board inactive",
+                               board.getBoardName());
+                    boardsSkipped++;
                 }
             } catch (Exception e) {
-                logger.error("Error synchronizing sprints for board {}: {}",
+                logger.error("Error synchronizing sprints for active board {}: {}",
                            board.getBoardName(), e.getMessage());
             }
         }
+
+        // Clean up sprints for inactive boards
+        cleanupSprintsForInactiveBoards();
+
+        logger.info("Sprint synchronization completed: {} boards with sprints processed, {} boards skipped, {} total sprints synced",
+                   boardsWithSprints, boardsSkipped, totalSprintCount);
 
         return totalSprintCount;
     }
 
     /**
-     * Synchronizes issues for all boards with proper sprint/board linking.
+     * Synchronizes issues for all active boards with proper sprint/board linking.
+     * Only processes boards marked as is_active = true in the database.
      *
      * @return Total number of issues synchronized
      */
     private int synchronizeIssuesForAllBoards() {
-        List<Board> allBoards = boardRepository.findByIsActiveTrue();
-        int totalIssueCount = 0;
+        List<Board> activeBoards = boardRepository.findByIsActiveTrue();
+        logger.info("Found {} active boards for issue synchronization", activeBoards.size());
 
-        for (Board board : allBoards) {
+        int totalIssueCount = 0;
+        int boardsProcessed = 0;
+
+        for (Board board : activeBoards) {
             try {
                 boolean hasSprints = board.getHasSprints() != null && board.getHasSprints();
 
-                logger.debug("Synchronizing issues for board: {} (ID: {}, Type: {}, Has Sprints: {})",
+                logger.debug("Synchronizing issues for active board: {} (ID: {}, Type: {}, Has Sprints: {})",
                            board.getBoardName(), board.getBoardId(),
                            board.getBoardType(), hasSprints);
 
@@ -191,16 +222,105 @@ public class DataSynchronizationOrchestrator {
                 );
 
                 totalIssueCount += issueCount;
+                boardsProcessed++;
 
-                logger.info("Synchronized {} issues for board: {}", issueCount, board.getBoardName());
+                logger.info("Synchronized {} issues for active board: {}", issueCount, board.getBoardName());
 
             } catch (Exception e) {
-                logger.error("Error synchronizing issues for board {}: {}",
+                logger.error("Error synchronizing issues for active board {}: {}",
                            board.getBoardName(), e.getMessage());
             }
         }
 
+        // Clean up issues for inactive boards
+        cleanupIssuesForInactiveBoards();
+
+        logger.info("Issue synchronization completed: {} active boards processed, {} total issues synced",
+                   boardsProcessed, totalIssueCount);
+
         return totalIssueCount;
+    }
+
+    /**
+     * Removes sprints associated with boards that are no longer active.
+     * This ensures data consistency and prevents orphaned sprint data.
+     */
+    private void cleanupSprintsForInactiveBoards() {
+        try {
+            logger.debug("Cleaning up sprints for inactive boards...");
+
+            List<Board> inactiveBoards = boardRepository.findByIsActiveFalse();
+            int sprintsRemoved = 0;
+
+            for (Board inactiveBoard : inactiveBoards) {
+                try {
+                    // Get sprints for this inactive board
+                    List<Sprint> sprintsToRemove = sprintRepository.findByBoardId(inactiveBoard.getBoardId());
+
+                    if (!sprintsToRemove.isEmpty()) {
+                        sprintRepository.deleteByBoardId(inactiveBoard.getBoardId());
+                        sprintsRemoved += sprintsToRemove.size();
+
+                        logger.info("Removed {} sprints for inactive board: {} (ID: {})",
+                                   sprintsToRemove.size(), inactiveBoard.getBoardName(), inactiveBoard.getBoardId());
+                    }
+                } catch (Exception e) {
+                    logger.error("Error cleaning up sprints for inactive board {}: {}",
+                               inactiveBoard.getBoardName(), e.getMessage());
+                }
+            }
+
+            if (sprintsRemoved > 0) {
+                logger.info("Sprint cleanup completed: removed {} sprints from {} inactive boards",
+                           sprintsRemoved, inactiveBoards.size());
+            } else {
+                logger.debug("No sprint cleanup needed - no sprints found for inactive boards");
+            }
+
+        } catch (Exception e) {
+            logger.error("Error during sprint cleanup for inactive boards: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Removes issues associated with boards that are no longer active.
+     * This ensures data consistency and prevents orphaned issue data.
+     */
+    private void cleanupIssuesForInactiveBoards() {
+        try {
+            logger.debug("Cleaning up issues for inactive boards...");
+
+            List<Board> inactiveBoards = boardRepository.findByIsActiveFalse();
+            int issuesRemoved = 0;
+
+            for (Board inactiveBoard : inactiveBoards) {
+                try {
+                    // Get issues for this inactive board
+                    List<Issue> issuesToRemove = issueRepository.findByBoardId(inactiveBoard.getBoardId());
+
+                    if (!issuesToRemove.isEmpty()) {
+                        issueRepository.deleteByBoardId(inactiveBoard.getBoardId());
+                        issuesRemoved += issuesToRemove.size();
+
+                        logger.info("Removed {} issues for inactive board: {} (ID: {})",
+                                   issuesToRemove.size(), inactiveBoard.getBoardName(), inactiveBoard.getBoardId());
+                    }
+                } catch (Exception e) {
+                    logger.error("Error cleaning up issues for inactive board {}: {}",
+                               inactiveBoard.getBoardName(), e.getMessage());
+                }
+            }
+
+            if (issuesRemoved > 0) {
+                logger.info("Issue cleanup completed: removed {} issues from {} inactive boards",
+                           issuesRemoved, inactiveBoards.size());
+            } else {
+                logger.debug("No issue cleanup needed - no issues found for inactive boards");
+            }
+
+        } catch (Exception e) {
+            logger.error("Error during issue cleanup for inactive boards: {}", e.getMessage(), e);
+        }
     }
 
     /**
